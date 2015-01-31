@@ -1,0 +1,118 @@
+// class
+program Program
+	
+	int gl;
+	const char cx = 'a';
+	
+	class A
+	{{
+		void a(int a) int j;{ 
+			j = 5;
+			print(a + j); 
+			
+		}
+		void b(){ print('1'); }
+		void c(){ print (gl); }
+		
+		
+		void condTest() int i, j; bool b;
+		{
+	
+			b = true;
+			i = 0;
+			j = 5;
+			
+			
+			while (i < 15)
+			{
+				i++;
+				if (i > 5 && i < 10 && i == 6 || i == 11 && j == 5) print(i);
+			
+			}
+			
+			
+			if (true || false)
+			{
+				print('x');
+			}
+			
+			if (cx == 'a')
+			{
+				print('c');
+			}
+			
+			if(b == true)
+			{
+				print('b');
+				
+			}
+	
+		}
+	
+	}}
+	
+	class C
+	{
+		int x;
+		int y;
+		int a;
+		int b;
+		int c;
+		
+		{
+			
+			void init(int i)
+			{
+				print(i);
+				x = i * 2;
+				x = i * 3;
+				x = i;
+				y = x * 2;
+				
+				this.x = 23;
+				
+				a = 1;
+				b = 2;
+				c = 3;
+			}
+		
+		}
+	
+	}
+
+	C c;
+	A a;
+
+{
+	
+	void print3(int a, int b, int c)
+	{
+		print(a);
+		print(b);
+		print(c);
+	}
+	
+	void main(){
+	
+		gl = 3;
+		
+		c = new C;
+		a = new A;
+		
+		c.init(5);
+		print3(c.b, c.x, c.y);
+		
+		c.init(c.x);
+		
+		print3(c.b, c.x, c.y);
+		
+		c.init(10);
+		
+		print3(c.c, c.x, c.y);
+		
+		a.condTest();
+	
+	}
+
+
+}

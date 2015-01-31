@@ -1,0 +1,2026 @@
+package rs.etf.markic;
+
+import java_cup.runtime.*;
+
+import java.util.List;
+import java.util.ArrayList;
+import java.util.ListIterator;
+import java.util.Deque;
+import java.util.ArrayDeque;
+import java.util.Set;
+import java.util.HashSet;
+
+import rs.etf.pp1.symboltable.*;
+import rs.etf.pp1.symboltable.concepts.*;
+import rs.etf.pp1.symboltable.visitors.SymbolTableVisitor;
+
+import rs.etf.pp1.mj.runtime.Code;
+
+
+/**
+ * @author Marin Markic
+ *
+ */
+
+//-------------------------------------- Parser code ------------------------------------------------------
+
+parser code {:
+        
+    // counters
+    int globalVarCount = 0;
+    int globalArrayCount = 0;
+    int globalFunctionCount = 0;
+    int classDefCount = 0;
+    int statementBlockCount = 0;
+    int fcallInMainCount = 0;
+    int newObjectCount = 0;
+    int classMethodCount = 0;
+    int classFieldCount = 0;
+    int classExtendedCount = 0;
+
+    public boolean errorDetected = false;
+    
+    //----------------- redefined methods for specific error reporting -----------------------
+    public void report_fatal_error(String message, Object info) throws java.lang.Exception 
+    {        
+        done_parsing();
+        report_error(message, info);
+        errorDetected = true;
+    }
+  
+    public void syntax_error(Symbol cur_token) 
+    {
+        report_error("\nSyntax error", cur_token);
+    }
+  
+    public void unrecovered_syntax_error(Symbol cur_token) throws java.lang.Exception 
+    {
+        report_fatal_error("Fatal error, parsing cannot continue", cur_token);
+    }
+
+    // syntax and semantic errors
+    public void report_error(String message, Object info)
+    {
+        if (info == null || message == null) return;
+
+        System.err.print(message);
+        System.err.flush();
+        
+        if (info instanceof Symbol)
+            System.err.println(" on line " + ((Symbol)info).left);
+        else System.err.println("");
+    }
+
+    // report object info - use this function for testing
+    public void report_info(String message, Object info) 
+    {
+        StringBuilder msg = new StringBuilder(message); 
+       
+        if (info instanceof Symbol)
+              msg.append (" on line ").append(((Symbol)info).left);
+        
+        System.out.println( msg.toString() ); // testing
+    }
+
+    public static void dump() { Tab.dump(); }
+
+    public static void dump(SymbolTableVisitor s) 
+    { 
+        if (s != null) Tab.dump(s); 
+    }
+
+    // non standard types
+    public Struct stringType = new Struct(Struct.Array); // char will be added at init
+    public Struct boolType = new Struct(5);
+
+
+:}
+
+
+//-------------------------------------- Action code --------------------------------------------------------------------------
+
+action code {:
+
+    // Action code variables ----------------------------------------------------------------------------------------------
+    private Struct currType;
+    private String currTypeName; 
+
+    private Obj currMethod = null;
+    private Obj currClass = null;
+
+    private boolean isFunctionCall = false;
+    private boolean returnFound = false;
+    private boolean inMain = false;
+    private boolean mainDetected = false;
+
+    // used for actual param type and number checking
+    private ArrayList<Struct> currActualParams = null;
+
+    // code generation address fixing
+    Deque<Integer> elseSkipAddressFixStack = new ArrayDeque<Integer>();
+    Deque<Integer> whileStartAddressFixStack = new ArrayDeque<Integer>();
+    Deque<ArrayList<Integer>> falseAddressFixStack = new ArrayDeque<ArrayList<Integer>>();
+    Deque<ArrayList<Integer>> breakAddressFixStack = new ArrayDeque<ArrayList<Integer>>();
+    List<Integer> orConditionAddressFixList = null;
+
+    // predefined funcions addresses
+    int printStringAdr = 0;
+    int readStringAdr = 0;
+    int addStringAdr = 0;
+
+    // virtual functions table
+    MethodTable methodTable = new MethodTable();
+
+    // polymorphism support 
+    List<Obj> classList = new ArrayList<Obj>();
+    Deque<Obj> callingObjAddressStack = new ArrayDeque<Obj>();
+
+    // code for initialization of constant strings
+    StringCodeBuffer StringCode = new StringCodeBuffer(); 
+
+    // Print error ----------------------------------------------------------------------------------------------
+    public void printError(String error) 
+    {
+        if (error == null) return;
+        System.err.println(error);
+        parser.errorDetected = true;
+    }
+
+    // Add class field ----------------------------------------------------------------------------------------------
+    void addClassField(String name, int line, boolean isArray)
+    {
+        if (name == null || currClass == null || currType == null) return;
+
+        if ( !isDeclared(name) ) 
+        { 
+            // not declared in this scope already
+            Obj temp = null;
+
+            if (isArray) temp = Tab.insert(Obj.Fld, name, new Struct(Struct.Array, currType));
+            else temp = Tab.insert(Obj.Fld, name, currType);
+
+
+            currClass.setAdr(currClass.getAdr() + 1);
+            temp.setAdr(currClass.getAdr());
+
+            parser.classFieldCount++;
+
+            parser.report_info( Messages.SemanticMessages.fieldDecl(temp, line), null );
+
+        }
+        else printError( Messages.SemanticErrors.alreadyDeclared(name, line) );
+
+    }
+
+    // Add global variable ----------------------------------------------------------------------------------------------
+    void addGlobalVariable(String name, int line, boolean isArray)
+    {
+        if (name == null || currType == null) return;
+
+        if ( !isDeclared(name) ) 
+        { 
+            // not declared in this scope already
+            Obj temp = null;
+
+            if (isArray) temp = Tab.insert(Obj.Var, name, new Struct(Struct.Array, currType));
+            else temp = Tab.insert(Obj.Var, name, currType);
+
+            if ( isArray ) parser.globalArrayCount++;
+            else parser.globalVarCount++;
+
+            parser.report_info( Messages.SemanticMessages.globalVarDecl(temp, line), null );
+
+        }
+        else printError( Messages.SemanticErrors.alreadyDeclared(name, line) );
+    }
+    
+    // Add formal parameter ----------------------------------------------------------------------------------------------
+    void addFormalParam(String name, int line, boolean isArray)
+    {
+        if (name == null || currType == null) return;
+
+        if ( !isDeclared(name) ) 
+        { 
+            // not declared in this scope already
+            Obj temp = null;
+
+            if (isArray) temp = Tab.insert(Obj.Var, name, new Struct(Struct.Array, currType));
+            else temp = Tab.insert(Obj.Var, name, currType);
+            
+            // add formal parameter
+            if (currMethod != null)
+            {
+                currMethod.setLevel( currMethod.getLevel() + 1 );
+                
+                if (currClass != null) temp.setAdr(temp.getAdr() + 1); // skip this
+            }
+ 
+        }
+        else printError( Messages.SemanticErrors.alreadyDeclared(name, line) );
+    }
+    
+    // Add local variable ----------------------------------------------------------------------------------------------
+    void addLocalVariable(String name, int line, boolean isArray)
+    {
+        if (name == null || currType == null) return;
+
+        if ( !isDeclared(name) ) 
+        { 
+            // not declared in this scope already
+            Obj temp = null;
+
+            if (isArray) temp = Tab.insert(Obj.Var, name, new Struct(Struct.Array, currType));
+            else temp = Tab.insert(Obj.Var, name, currType);
+
+            parser.report_info( Messages.SemanticMessages.localVarDecl(temp, line), null );
+            
+        }
+        else printError( Messages.SemanticErrors.alreadyDeclared(name, line) );
+    }
+
+    // Add global constant - const type x = value --------------------------------------------------------------------------------------
+    void addConstant(String name, Obj con, int line)
+    {
+        if (name == null || con == null || currType == null || currTypeName == null) return;
+
+        // check for valid type = value combination
+        if ( currType.getKind() != con.getType().getKind() )
+        {
+            printError( Messages.SemanticErrors.wrongType(currTypeName, line) );
+            return;
+        }
+
+        if ( isDeclared(name) )
+        {
+            printError( Messages.SemanticErrors.alreadyDeclared(name, line) );
+            return;
+        }
+
+        // string type
+        if (con.getType() == parser.stringType)
+        {
+            Obj obj = Tab.insert(Obj.Var, name, con.getType());
+
+            obj.setLevel(0); // global 
+                    
+            StringCode.put(Code.putstatic);
+            StringCode.put2(obj.getAdr());
+
+            return;
+        }
+
+        Obj obj = Tab.insert(Obj.Con, name, con.getType());
+
+        obj.setAdr(con.getAdr());          
+        parser.report_info( Messages.SemanticMessages.constVarDecl(obj, line), null );
+
+    }
+
+
+    // Semantic helper methods ----------------------------------------------------------------------------------------------
+    // used for actual param type and number checking
+    void addActualParam(Obj obj)
+    {
+        if (obj == null) return;
+        
+        if (currActualParams == null) currActualParams = new ArrayList<Struct>();
+
+        currActualParams.add(obj.getType());
+    }
+
+    // find if symbol has been declared - ONLY in current scope
+    boolean isDeclared(String name)
+    {
+        if (name == null) return true;
+
+        Obj temp = Tab.find(name);
+        if (temp.getKind() == Obj.Type) return true; // prevent int int;
+        
+        temp = Tab.currentScope.findSymbol(name);
+        
+        if (temp == Tab.noObj || temp == null) return false;
+        
+        return true;
+    }
+
+    // Actual and Formal parameter checking ------------------------------------------------------------------------------------------
+    void checkActualParams(Obj f, int line)
+    {
+        if (f == null) return;
+
+        int count = f.getLevel();
+
+        if (f.getName().equals("len") || f.getName().equals("ord") || f.getName().equals("chd")) 
+        {
+            currActualParams = null;
+            return;
+        }
+
+        // check numbers
+        if (currActualParams == null)
+        {
+            if (count > 0) printError( Messages.SemanticErrors.wrongParams(f.getName(), line) );
+            return;
+        }
+
+        // number difference
+        if ( currActualParams.size() != count )
+        {
+            printError( Messages.SemanticErrors.wrongParams(f.getName(), line) );
+            currActualParams = null;
+            return;
+        }
+     
+        ListIterator<Struct> it = currActualParams.listIterator(0); // start on first
+
+        for( Obj member : f.getLocalSymbols() )
+        {
+            if (count-- > 0) 
+            {
+                    Struct s = it.next(); // check types
+                    if ( !s.compatibleWith(member.getType()) && !isPolymorph(member.getType(), s) ) 
+                        printError( Messages.SemanticErrors.wrongParams(f.getName(), line) );
+            }
+        }
+
+        currActualParams = null; // done for this call
+    }
+
+
+    // Type dst = src ------------------------------------------------------------------------------------------
+    boolean isPolymorph(Struct dst, Struct src)
+    {
+        if (dst == null || src == null) return false;
+        if (dst.getKind() != Struct.Class || src.getKind() != Struct.Class) return false;
+
+        if (dst.equals(src)) return true;
+
+        Struct t = src.getElemType();
+        
+        while (t != null)
+        {
+            if (dst.equals(t)) return true;
+            t = t.getElemType();
+        }
+
+        return false;
+    }
+
+    // add pointer to virtual table - field0
+    void addVTpointer()
+    {
+        Tab.insert(Obj.Fld, "VTaddress", Tab.intType);
+    }
+
+    // called behind function or method call 
+    void generateFunctionCall(Obj func, int line)
+    {
+        if (func == null) return;
+
+        checkActualParams(func, line);
+
+        if (func.getName().equals("len"))
+        {
+            Code.put(Code.arraylength);
+            return;
+        }
+
+        // method call
+        if (isFunctionCall == false || currClass != null)
+        {
+
+            if (currClass == null)
+            {
+                // load obj address to get VT address
+                Obj temp = callingObjAddressStack.peek();
+                
+                if (temp != null)
+                {
+                    callingObjAddressStack.pop();
+                    Code.load(temp);
+                }
+                else
+                {
+                    // function call
+                    int destAdr = func.getAdr() - Code.pc;
+                    Code.put(Code.call);
+                    Code.put2(destAdr);
+                    return;
+                }
+                    
+            }
+            else 
+            {
+                Code.put(Code.load_n);
+                callingObjAddressStack.pop();
+            }
+
+
+            Code.put(Code.getfield);
+            Code.put2(0);
+
+            Code.put(Code.invokevirtual);
+
+            String s = func.getName();
+
+            for (int i = 0; i < s.length(); i++)
+                 Code.put4(s.charAt(i));
+
+            Code.put4(-1);
+            
+            return;
+        }
+
+        // function call
+        int destAdr = func.getAdr() - Code.pc;
+        Code.put(Code.call);
+        Code.put2(destAdr);
+
+    }
+
+    // generate predefined functions that prints string -------------------------------------------------------------------------
+    void generatePrintString()
+    {
+            printStringAdr = Code.pc;
+
+            // (string), len, i
+            Code.put(Code.enter);
+            Code.put(1); 
+            Code.put(3);
+            
+            // i = 0
+            Code.put(Code.const_n);
+            Code.put(Code.store_2);
+            
+            // len = len(str);
+            Code.put(Code.load_n);
+            Code.put(Code.arraylength);
+            Code.put(Code.store_1);
+            
+            // while (i < len)
+            Code.put(Code.load_2);
+            Code.put(Code.load_1);
+            Code.put(Code.jcc + Code.ge);
+            Code.put2(15);
+
+            // print s[i];
+            Code.put(Code.load_n);
+            Code.put(Code.load_2);
+            Code.put(Code.baload);
+            Code.put(Code.const_1);
+            Code.put(Code.bprint);
+            // i++
+            Code.put(Code.load_2);
+            Code.put(Code.const_1);
+            Code.put(Code.add);
+            Code.put(Code.store_2);
+            
+            Code.put(Code.jmp);
+            Code.put2(-14);
+            
+            Code.put(Code.exit);
+            Code.put(Code.return_);
+    }
+
+    // generate predefined functions that reads string -------------------------------------------------------------------------
+    void generateReadString()
+    {
+            readStringAdr = Code.pc;
+            
+            // (string), len, i
+            Code.put(Code.enter);
+            Code.put(1); 
+            Code.put(3);
+
+            // i = 0
+            Code.put(Code.const_n);
+            Code.put(Code.store_2);
+            
+            // len = len(str);
+            Code.put(Code.load_n);
+            Code.put(Code.arraylength);
+            Code.put(Code.store_1);
+
+            // while (i < len)
+            Code.put(Code.load_2);
+            Code.put(Code.load_1);
+            Code.put(Code.jcc + Code.ge);
+            Code.put2(14);
+
+            // read s[i];
+            Code.put(Code.load_n);
+            Code.put(Code.load_2);
+            Code.put(Code.bread);
+            Code.put(Code.bastore);
+
+            // i++
+            Code.put(Code.load_2);
+            Code.put(Code.const_1);
+            Code.put(Code.add);
+            Code.put(Code.store_2);
+
+            Code.put(Code.jmp);
+            Code.put2(-13);
+            
+            Code.put(Code.exit);
+            Code.put(Code.return_);
+    }
+
+    // generate predefined functions that concatenate strings -------------------------------------------------------------------------
+    void generateAddString()
+    {
+           addStringAdr = Code.pc;
+
+            // (string s1, string s2); int i, j, m, n; string res;
+            Code.put(Code.enter);
+            Code.put(2); 
+            Code.put(7);
+
+            // m = len(s1);
+            Code.put(Code.load_n);
+            Code.put(Code.arraylength);
+            Code.put(Code.store);
+            Code.put(4);
+            
+            // n = len(s2);
+            Code.put(Code.load_1);
+            Code.put(Code.arraylength);
+            Code.put(Code.store);
+            Code.put(5);
+            
+            // res = new char[m+n]
+            Code.put(Code.load);
+            Code.put(4);
+            Code.put(Code.load);
+            Code.put(5);
+            Code.put(Code.add);
+            Code.put(Code.newarray);
+            Code.put(0);
+            Code.put(Code.store);
+            Code.put(6);
+
+            // while (i < m)
+            Code.put(Code.load_2);
+            Code.put(Code.load);
+            Code.put(4);
+            Code.put(Code.jcc + Code.ge);
+            Code.put2(17);
+
+            // s[i] = s1[i];
+            Code.put(Code.load);
+            Code.put(6);
+            Code.put(Code.load_2);
+            Code.put(Code.load_n);
+            Code.put(Code.load_2);
+            Code.put(Code.baload);
+            Code.put(Code.bastore);
+
+            // i++;
+            Code.put(Code.load_2);
+            Code.put(Code.const_1);
+            Code.put(Code.add);
+            Code.put(Code.store_2);
+
+            Code.put(Code.jmp);
+            Code.put2(-17);
+            
+            // while (j < n)
+            Code.put(Code.load_3);
+            Code.put(Code.load);
+            Code.put(5);
+            Code.put(Code.jcc + Code.ge);
+            Code.put2(21);
+
+            // s[i] = s2[j];
+            Code.put(Code.load);
+            Code.put(6);
+            Code.put(Code.load_2);
+            Code.put(Code.load_1);
+            Code.put(Code.load_3);
+            Code.put(Code.baload);
+            Code.put(Code.bastore);
+            
+            // i++;
+            Code.put(Code.load_2);
+            Code.put(Code.const_1);
+            Code.put(Code.add);
+            Code.put(Code.store_2);
+
+            // j++;
+            Code.put(Code.load_3);
+            Code.put(Code.const_1);
+            Code.put(Code.add);
+            Code.put(Code.store_3);
+
+            Code.put(Code.jmp);
+            Code.put2(-21);
+
+            // res left on stack
+            Code.put(Code.load);
+            Code.put(6);
+            
+            Code.put(Code.exit);
+            Code.put(Code.return_);
+    }
+    // ------------------------------------------------------------------------------------------------------------------------
+    void generateVFT()
+    {
+        if (parser.errorDetected) return;
+
+
+        Set<String> methodsKeySet = null;
+        Set<Obj> methodsSet = null;
+            
+        boolean first = true;
+
+        for (Obj i : classList)
+        {
+                // class members
+                Struct type = i.getType();
+
+                while (type != null)
+                {
+                        for (Obj obj : type.getMembers())
+                        {
+                                if (obj.getKind() != Obj.Meth) continue;
+        
+                                if (first) 
+                                {
+                                    // save VFT pointer in class address
+                                    methodsKeySet = new HashSet<String>();
+                                    methodsSet = new HashSet<Obj>();
+        
+                                    i.setAdr(Code.dataSize);
+                                    first = false;
+                                } 
+                                    
+                                if (methodsKeySet.contains(obj.getName() + obj.getLevel())) continue;
+
+                                methodsKeySet.add(obj.getName() + obj.getLevel());
+                                methodsSet.add(obj);
+                        }
+
+                        type = type.getElemType();
+               
+                } // end of whle
+
+                if (!first)
+                {
+                    // add methods to virtual functions table
+                    for (Obj obj : methodsSet)
+                        methodTable.addFunctionEntry(obj.getName(), obj.getAdr());
+
+                    // all class methods added
+                    methodTable.addTableTerminator();
+                    first = true;
+                }
+            
+            } // end of for
+    }
+
+:}
+
+//-------------------------------------- Parser scan method -----------------------------------------------------------------------
+
+scan with {:
+  	Symbol s = this.getScanner().next_token();
+    // print lexer output - if testing
+  	//if (s != null && s.value != null) // don't print lex
+  		  //System.out.println(s.toString() + " " + s.value.toString());
+  		
+  	return s;
+:}
+
+init with {:
+    Tab.init(); // Universe scope
+
+    stringType.setElementType(Tab.charType);
+
+    Tab.currentScope.addToLocals (new Obj (Obj.Type, "string", stringType ) );
+    Tab.currentScope.addToLocals (new Obj (Obj.Type, "bool", boolType ) ); 
+:}
+
+//-------------------------------------- Terminals -----------------------------------------------------------
+
+// Keywords
+terminal PROGRAM, CONST, CLASS, EXTENDS, IF, ELSE, WHILE, READ, PRINT, BREAK, RETURN, NEW;
+
+// Identifiers
+terminal String IDENT;
+
+// Constants
+terminal Integer NUMBER;
+terminal Character CHARCONST;
+terminal String BOOLCONST;
+terminal String STRCONST;
+
+// Operators
+terminal DOT, COMMA, SEMI, LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET;
+terminal OR, AND, EQUAL, NOTEQUAL, GREATER, GREATEREQUAL, LESS, LESSEQUAL;
+terminal PLUS, MINUS, INC, DEC, MUL, DIV, MOD, ASSIGN;
+terminal VOID;
+
+//-------------------------------------- Non Terminals ------------------------------------------------------
+
+non terminal Program, DeclarationList, Declaration;
+
+non terminal ConstList, ConstDecl, ConstVar;
+non terminal GlobalVarList, GlobalVarDecl , GlobalVar;
+non terminal FunctionDeclList, FunctionDecl, Function; 
+non terminal VarDeclList, VarList, VarDecl, Var;
+
+non terminal ClassDecl, ClassBody, ClassFieldsDeclList, Super;
+non terminal FieldsDeclList, FieldsDecl, Field;
+non terminal MethodsDeclList, MethodDecl, Method;
+non terminal FormPars, FormParamList, FormParamDecl;
+
+non terminal StatementList, Statement, WhileStart, WhileEnd, IfEnd, ElseStart, ElseEnd;
+non terminal Matched, Unmatched, Cond, Condition, CondTerm;
+non terminal ActualParamList, ActualPars;
+
+// Semantic
+non terminal Obj ProgramName, FuncName, ClassName, MethodName;
+non terminal Obj Type, Expr, Term, Factor, Const;
+non terminal Struct CondFact;
+
+non terminal Obj Designator, IdentList, FuncCall;
+non terminal Integer Addop, Mulop, Relop;
+
+
+//----------------------------------------- Terms ---------------------------------------------------------------
+
+Program ::= PROGRAM ProgramName:p DeclarationList LBRACE 
+    {:
+            
+            // declarations finished - create virtual functions table
+            Code.dataSize = Tab.currentScope.getnVars();
+            generateVFT();
+    :}
+    FunctionDeclList RBRACE 
+    {:
+            
+            // program end
+            Tab.chainLocalSymbols(p); 
+            Tab.closeScope(); 
+            
+            if (!mainDetected) printError( Messages.SemanticErrors.noMainDetected );
+
+    :}
+    ;
+
+ProgramName ::= IDENT:pName 
+{:
+        // program start
+        RESULT = Tab.insert(Obj.Prog, pName, Tab.noType);
+        Tab.openScope();
+
+        generatePrintString();
+        generateReadString();
+        generateAddString();
+:};
+
+
+DeclarationList ::= DeclarationList Declaration | /* epsilon */ ;
+Declaration ::= ConstDecl | GlobalVarDecl | ClassDecl ;
+
+
+//----------------------------------------- Constants ---------------------------------------------------------------
+
+ConstDecl ::= CONST Type ConstList SEMI 
+            | CONST Type error SEMI
+            ;
+ConstList ::= ConstList COMMA ConstVar | ConstVar ;
+
+ConstVar ::= IDENT:name ASSIGN Const:i  {: addConstant(name, i, nameleft); :};
+
+Const ::= 
+        NUMBER:i    
+        {:     
+            // set type and value
+            Obj con = new Obj(Obj.Con, "", Tab.intType);       
+            
+            con.setAdr(i.intValue());
+                
+            RESULT = con;
+        :}
+
+        | CHARCONST:i
+        {: 
+            // set type and value
+            Obj con = new Obj(Obj.Con, "", Tab.charType);       
+            
+            con.setAdr(i.charValue());
+                
+            RESULT = con;
+        :}
+
+        | BOOLCONST:i        
+        {: 
+            // set type and value
+            Obj con = new Obj(Obj.Con, "", parser.boolType);       
+            
+            if (i.equals("true")) con.setAdr(1);
+            else con.setAdr(0);
+                
+            RESULT = con;
+        :}
+        
+        | STRCONST:i
+        {: 
+            Obj con = new Obj(Obj.Con, "", parser.stringType);
+
+            // allocate on heap - len bytes
+            StringCode.loadConst(i.length());
+            StringCode.put(Code.newarray);
+            StringCode.put(0);
+
+            // address on stack
+            for (int index = 0; index < i.length(); index++)
+            {
+                StringCode.put(Code.dup); // duplicate, bastore removes address
+                StringCode.loadConst(index);
+                StringCode.loadConst(i.charAt(index));
+                StringCode.put(Code.bastore);
+            }
+
+            RESULT = con; 
+        :}
+        ;
+
+
+//----------------------------------------- Global Variables ----------------------------------------------------------
+
+GlobalVarDecl ::= Type GlobalVarList SEMI 
+                | Type error SEMI {: printError(Messages.SyntaxErrors.globalErr); :}
+                ;
+
+GlobalVarList ::= GlobalVarList COMMA GlobalVar 
+                | GlobalVar 
+                | error COMMA {: printError(Messages.SyntaxErrors.globalErr); :}
+                ;
+
+
+/* Global variable */
+GlobalVar ::= IDENT:name                    {: addGlobalVariable(name, nameleft, false); :} 
+            | IDENT:name LBRACKET RBRACKET  {: addGlobalVariable(name, nameleft, true); :}
+            ;
+
+
+//----------------------------------------- Class ---------------------------------------------------------------
+
+ClassName ::= IDENT:name 
+{:
+        // class start
+        Obj temp = null;
+        
+        // add new type if it does not exists already
+        if ( !isDeclared(name) )
+        {
+            temp = new Obj (Obj.Type, name, new Struct (Struct.Class) );
+
+            classList.add(temp);
+            
+            Tab.currentScope.addToLocals( temp );
+            Tab.openScope();
+
+            parser.classDefCount++;
+
+            parser.report_info( Messages.SemanticMessages.classDecl(temp, nameleft), null );
+
+            temp.getType().setElementType(null);
+            addVTpointer();
+
+            temp.setAdr(0);
+
+        }
+        else printError( Messages.SemanticErrors.alreadyDeclared(name, nameleft) );
+                        
+
+        currClass = temp;
+        RESULT = temp;
+:};
+
+ClassDecl ::= CLASS ClassName:className ClassBody
+            {:     
+                    // class end
+                    if (className != null)
+                    {
+                        Tab.chainLocalSymbols(className.getType());
+                        Tab.closeScope();
+
+                    }
+
+                    currClass = null;
+            :}
+
+            | CLASS ClassName:className EXTENDS Super ClassBody
+            {:      
+                    // class end
+                    if (className != null)
+                    {
+                        Tab.chainLocalSymbols(className.getType());
+                        Tab.closeScope();
+                        parser.classExtendedCount++;
+                    }
+                    
+                    currClass = null;
+            :}
+
+            | CLASS ClassName EXTENDS error ClassBody 
+            {: 
+                    printError(Messages.SyntaxErrors.extendsErr); 
+            :}
+            ;
+
+// extended class - before body
+Super ::= Type:t 
+{:
+    
+        if (currClass != null && currTypeName != null && t != null)
+        {
+
+            currClass.getType().setElementType( t.getType() );
+            currClass.setAdr( t.getAdr() );
+
+            // check for self inheritance
+            if (currTypeName.equals( currClass.getName() ) ) printError( Messages.SemanticErrors.selfInheritance(tleft) );
+        }
+
+:};
+
+
+ClassBody ::=   LBRACE ClassFieldsDeclList LBRACE MethodsDeclList RBRACE RBRACE 
+            |   LBRACE ClassFieldsDeclList RBRACE 
+            ;
+
+ClassFieldsDeclList ::= ClassFieldsDeclList FieldsDecl | /* epsilon */ ;
+MethodsDeclList ::= MethodsDeclList MethodDecl | /* epsilon */ ;
+
+
+/* Class fields */
+FieldsDecl ::=  Type FieldsDeclList SEMI 
+            |   Type error SEMI         {: printError(Messages.SyntaxErrors.fieldsErr); :}
+            |   error                   {: printError(Messages.SyntaxErrors.fieldsErr); :}
+            ;
+
+FieldsDeclList ::= FieldsDeclList COMMA Field | Field ;
+
+Field ::= IDENT:name                   {: addClassField(name, nameleft, false); :}
+        | IDENT:name LBRACKET RBRACKET {: addClassField(name, nameleft, true); :} 
+        ;
+
+
+/* Class methods --------------------------------------------------------------------------------------------------------- */
+MethodName ::= IDENT:name
+{:
+        // method start
+        Obj temp = null;
+
+        if (currClass != null && currType != null)
+        {
+        
+                if ( !isDeclared(name) ) 
+                { 
+                    // not declared
+                    temp = Tab.insert(Obj.Meth, name, currType);
+                
+                    temp.setLevel(0); // use to count formal parameters
+                    temp.setAdr(Code.pc); // save pc
+
+                    Tab.openScope(); // enter method scope
+                }
+                else printError( Messages.SemanticErrors.alreadyDeclared(name, nameleft) );
+        }
+        
+        currMethod = temp;
+        RESULT = temp;
+:};
+
+MethodDecl ::= Type Method | VOID {: currType = Tab.noType; :} Method ;
+
+Method ::= MethodName:m LPAREN FormPars RPAREN VarDeclList 
+    {:
+            // chain before body to available recursion
+            if (m != null && currMethod != null) 
+            {
+                Tab.chainLocalSymbols(currMethod);
+        
+                Code.put(Code.enter);
+                Code.put( currMethod.getLevel() + 1); // formal parameters
+                Code.put( Tab.currentScope.getnVars() + 1); // formal + locals
+
+            }
+    :}
+    LBRACE StatementList RBRACE 
+    {: 
+            // method end
+            if (m != null && currMethod != null) 
+            {
+
+                if ( (m.getType() != Tab.noType) && !returnFound ) 
+                    printError( Messages.SemanticErrors.noReturn(m.getName(), mleft) );
+            
+                parser.statementBlockCount++; 
+                parser.classMethodCount++; 
+                        
+                Tab.closeScope(); // chained before body
+            
+                Code.put(Code.exit);
+                Code.put(Code.return_);
+            }
+
+            returnFound = false;
+            currMethod = null;
+
+    :}
+    ;
+
+
+
+//----------------------------------------- Functions ---------------------------------------------------------------
+
+FunctionDeclList ::= FunctionDeclList FunctionDecl | /* epsilon */ ;
+
+FunctionDecl ::= Type Function | VOID {: currType = Tab.noType; :} Function ;
+
+FuncName ::= IDENT:name 
+{:  
+        // function start
+        currMethod = null;
+
+        if ( !isDeclared(name) ) 
+        {
+            // not declared
+            currMethod = Tab.insert(Obj.Meth, name, currType);
+            currMethod.setLevel(0); // use to count formal parameters
+
+            currMethod.setAdr(Code.pc); // save pc
+
+            Tab.openScope(); // enter function scope
+
+        }
+        else printError( Messages.SemanticErrors.alreadyDeclared(name, nameleft) );
+
+
+        // main
+        if ( name.equals("main") && currMethod != null)
+        {
+                if (currType != Tab.noType || currActualParams != null) printError( Messages.SemanticErrors.mainFunctionErr(nameleft) );
+                else  
+                {
+                    // in main function. 
+                    inMain = true;
+                    mainDetected = true;
+                    Code.mainPc = currMethod.getAdr(); // set main PC
+
+                    // store vft-creation byte code before the first instruction 
+                    Object array[] = methodTable.toArray(); 
+                    
+                    for (int i = 0; i < array.length; i++) 
+                        Code.buf[Code.pc++] = ((Byte)array[i]).byteValue(); 
+                    
+                    methodTable.clear(); 
+
+                    // store const string initialisation byte code before the first instruction
+                    for (int i = 0; i < StringCode.size(); i++) 
+                        Code.buf[Code.pc++] = (StringCode.getBuffer())[i];
+                }
+
+        }
+        else inMain = false;
+
+        RESULT = currMethod;
+:};
+
+Function ::= FuncName:f LPAREN FormPars RPAREN VarDeclList LBRACE
+    {: 
+            // chain before body to available recursion
+            if (f != null && currMethod != null) 
+            {
+                Tab.chainLocalSymbols(currMethod);
+        
+                Code.put(Code.enter);
+                Code.put( currMethod.getLevel() ); // formal parameters
+                Code.put( Tab.currentScope.getnVars() ); // formal + locals
+            }
+
+    :}
+    StatementList RBRACE 
+    {: 
+            // function end
+            if (f != null && currMethod != null)
+            {
+
+                if ( (f.getType() != Tab.noType) && !returnFound ) 
+                    printError( Messages.SemanticErrors.noReturn(f.getName(), fleft) );
+
+                parser.statementBlockCount++; 
+                parser.globalFunctionCount++;
+                            
+                Tab.closeScope();
+
+                returnFound = false;
+                currMethod = null;
+
+                Code.put(Code.exit);
+                Code.put(Code.return_);
+            }    
+    :}
+    ; 
+
+
+
+/* Function and method parameters ---------------------------------------------------------------------------------------------------------  */
+FormPars ::= FormParamList | /* epsilon */ ;
+
+FormParamList ::= FormParamList COMMA FormParamDecl 
+                | FormParamDecl 
+                | error {: printError(Messages.SyntaxErrors.formParsErr); :} 
+                ;
+
+FormParamDecl ::= Type IDENT:name                   {: addFormalParam(name, nameleft, false); :}
+                | Type IDENT:name LBRACKET RBRACKET {: addFormalParam(name, nameleft, true); :}
+                ;
+
+
+/* Local variables ------------------------------------------------------------------------------------------------------------------------- */
+VarDeclList ::= VarDeclList VarDecl 
+              | /* epsilon */ 
+              | error {: printError(Messages.SyntaxErrors.localErr); :}
+              ;
+VarDecl ::= Type VarList SEMI
+          | Type error SEMI {: printError(Messages.SyntaxErrors.localErr); :}
+          | Type error      {: printError(Messages.SyntaxErrors.localErr); :}
+          ;
+
+VarList ::= VarList COMMA Var | Var ;
+
+Var ::= IDENT:name                    {: addLocalVariable(name, nameleft, false); :}
+      | IDENT:name LBRACKET RBRACKET  {: addLocalVariable(name, nameleft, true); :}
+      ;
+
+
+// Type checking
+Type ::= IDENT:typeName 
+{:
+        Obj obj = Tab.find(typeName); // find type in symtable
+
+        currType = null;
+
+        if (obj == Tab.noObj) 
+        {
+                printError( Messages.SemanticErrors.noTyperErr(typeName, typeNameleft) );
+                RESULT = null;
+        }
+        else 
+        {
+                if (Obj.Type == obj.getKind()) 
+                {
+                        RESULT = obj;
+                        currType = obj.getType(); 
+                        currTypeName = typeName;
+
+                }
+                else 
+                {
+                        printError( Messages.SemanticErrors.typerErr(typeName, typeNameleft) );
+                        RESULT = null;
+                }
+        }
+
+:};
+
+
+
+//----------------------------------------- Statements ---------------------------------------------------------------
+
+StatementList ::= StatementList Statement | /* epsilon */ ;
+
+Statement ::= Matched | Unmatched ;
+
+/* Matched can be inside if/else and while*/
+Matched ::= Designator:d ASSIGN Expr:e SEMI
+            {:
+                    
+                    if (d != null && e != null)
+                    {
+                        Struct t1 = d.getType();
+                        Struct t2 = e.getType();
+
+
+                        if ( !t2.assignableTo(t1) && !isPolymorph(t1, t2) )
+                            printError( Messages.SemanticErrors.wrongType(d.getName(), dleft) );
+
+                        if (d.getKind() == Obj.Con)
+                            printError( Messages.SemanticErrors.assigningToConst(d.getName(), dleft) );
+
+                        Code.store(d);
+
+                    }
+            :}
+
+            | Designator ASSIGN error SEMI 
+            {: 
+                    printError(Messages.SyntaxErrors.assignErr); 
+            :}
+
+            | Designator:d INC SEMI
+            {:
+                    if (d != null)
+                    {
+                        if (d.getKind() == Obj.Con)
+                            printError( Messages.SemanticErrors.assigningToConst(d.getName(), dleft) );
+
+                        if (d.getType() != Tab.intType) 
+                            printError( Messages.SemanticErrors.onlyInteger(dleft) );
+                        else
+                        {
+                            Code.load(d);
+                            Code.loadConst(1);
+                            Code.put(Code.add);
+                            Code.store(d);
+                        }
+                    }
+
+            :}
+
+            | Designator:d DEC SEMI
+            {:
+                    if (d != null)
+                    {
+                        if (d.getKind () == Obj.Con)
+                            printError( Messages.SemanticErrors.assigningToConst(d.getName(), dleft) );
+
+                        if (d.getType() != Tab.intType) 
+                            printError( Messages.SemanticErrors.onlyInteger(dleft) );
+                        else
+                        {
+                            Code.load(d);
+                            Code.loadConst(1);
+                            Code.put(Code.sub);
+                            Code.store(d);
+                        }
+                    }
+
+            :}
+
+            | FuncCall:f LPAREN ActualPars RPAREN SEMI 
+            {:
+                    // end of function call
+                    generateFunctionCall(f, fleft);
+
+                    if (f != null)
+                        if (f.getType() != Tab.noType) 
+                            Code.put(Code.pop);
+            :}
+
+            | Designator error SEMI 
+            {: 
+                    printError(Messages.SyntaxErrors.funcErr); 
+            :}
+
+            | READ LPAREN Designator:d RPAREN SEMI 
+            {:
+                    if (d != null)
+                    {
+                        if (d.getKind() == Obj.Con)
+                            printError( Messages.SemanticErrors.assigningToConst(d.getName(), dleft) );
+                        
+                        if (d.getType() == Tab.intType)
+                        {
+                                Code.put(Code.read);
+                                Code.store(d);
+                        }
+                        else if (d.getType() == Tab.charType) 
+                        {
+                                Code.put(Code.bread);
+                                Code.store(d);
+                        }
+                        else if (d.getType() == parser.boolType)
+                        {
+                                Code.put(Code.read);
+                                Code.store(d);
+                        }
+                        else if (d.getType() == parser.stringType)
+                        {
+                            
+                            Code.load(d);
+                            Code.put(Code.call);
+                            Code.put2(readStringAdr - Code.pc + 1);
+
+                        }
+                        else printError( Messages.SemanticErrors.wrongType(d.getName(), dleft) );
+
+                    }
+            
+            :}
+
+            | PRINT LPAREN Expr:e RPAREN SEMI
+            {:
+
+                if (e != null)
+                {  
+                        if (e.getType() == Tab.intType)
+                        {
+                                Code.loadConst(5);
+                                Code.put(Code.print);  
+                        }
+                        else if (e.getType() == Tab.charType)
+                        {
+                                Code.loadConst(1);
+                                Code.put(Code.bprint);
+                        }
+                        else if (e.getType() == parser.boolType)
+                        {
+                                Code.loadConst(1);
+                                Code.put(Code.print);
+                        }
+                        else if (e.getType() == parser.stringType)
+                        {       
+                            Code.put(Code.call);
+                            Code.put2(printStringAdr - Code.pc + 1);
+                        }
+                        else printError( Messages.SemanticErrors.wrongParams("print", eleft) );                  
+                }
+            :}
+
+
+            | PRINT LPAREN Expr:e COMMA NUMBER:i RPAREN SEMI
+            {:
+                if (e != null)
+                {  
+                        if (e.getType() == Tab.intType)
+                        {
+                                Code.loadConst(i);
+                                Code.put(Code.print);  
+                        }
+                        else if (e.getType() == Tab.charType)
+                        {
+                                Code.loadConst(i);
+                                Code.put(Code.bprint);
+                        }
+                        else if (e.getType() == parser.boolType)
+                        {
+                                Code.loadConst(i);
+                                Code.put(Code.print);
+                        }
+                        else if (e.getType() == parser.stringType)
+                        {     
+                            Code.put(Code.call);
+                            Code.put2(printStringAdr - Code.pc + 1);
+                        }
+                        else printError( Messages.SemanticErrors.wrongParams("print", eleft) );                  
+                }
+            :}
+
+
+            | RETURN Expr:e SEMI
+            {:
+                    
+                    if (currMethod != null && e != null)
+                    {
+                        
+                        Struct t = e.getType();
+                        
+                        returnFound = true;
+
+                        if ( !t.compatibleWith( currMethod.getType())  && !isPolymorph(currMethod.getType(), t) )
+                            printError( Messages.SemanticErrors.wrongRetValue(currMethod.getName(), eleft) );
+                        else
+                        {
+                                Code.put(Code.exit);
+                                Code.put(Code.return_);
+                        }
+
+                    }  
+
+            :}
+
+            | RETURN:t SEMI
+            {:
+                
+                    if (currMethod != null)
+                    {
+                        if ( currMethod.getType() != Tab.noType )
+                            printError( Messages.SemanticErrors.wrongRetValue(currMethod.getName(), tleft) );
+                        else
+                        {
+                                Code.put(Code.exit);
+                                Code.put(Code.return_);
+                        }
+                    } 
+            :}
+            
+            | BREAK:b SEMI
+            {:
+                    if ( breakAddressFixStack.peek() == null ) printError( Messages.SemanticErrors.breakOutOfLoop(bleft) );
+                    else
+                    {
+                        Code.putJump(0);
+                        breakAddressFixStack.peek().add(Code.pc - 2);
+                    }
+            :}
+            
+            | LBRACE StatementList RBRACE 
+            {: 
+                    parser.statementBlockCount++; 
+            :}
+          
+            | WHILE WhileStart Cond Matched WhileEnd        
+            | IF Cond Matched ElseStart ELSE IfEnd Matched ElseEnd
+            ;
+
+Unmatched ::= IF Cond Statement IfEnd
+            | IF Cond Matched ElseStart ELSE IfEnd Unmatched ElseEnd
+            | WHILE WhileStart Cond Unmatched WhileEnd
+            ;
+
+
+// first statement behind IF
+IfEnd ::= 
+        {:  
+            // false condition, jump over if
+            ArrayList<Integer> al = falseAddressFixStack.peek();
+
+            if (al != null)
+            {
+                for (Integer i: al) Code.fixup(i);
+
+                falseAddressFixStack.pop();
+            }
+        
+        :};
+
+// first statement inside ELSE
+ElseStart ::=
+        {:
+            // skip else if IF was true
+            Code.putJump(0);
+            elseSkipAddressFixStack.push(Code.pc - 2);
+
+        :};
+
+// first statement behind ELSE
+ElseEnd ::= 
+        {: 
+            // end of else
+            Code.fixup( elseSkipAddressFixStack.pop() ); 
+        :};
+
+
+
+WhileStart ::= 
+            {: 
+                // all breaks inside one level while
+                breakAddressFixStack.push( new ArrayList<Integer>() );
+
+                // save address for return
+                whileStartAddressFixStack.push(Code.pc);
+
+            :}; 
+
+WhileEnd ::= 
+            {: 
+                // jump back to the start of while
+                Code.putJump( whileStartAddressFixStack.pop() );
+
+                // false condition, jump over while
+                ArrayList<Integer> al = falseAddressFixStack.pop();
+                for (Integer i: al) Code.fixup(i);
+
+                // fix all breaks
+                al = breakAddressFixStack.pop();
+                
+                for (Integer i: al) Code.fixup(i);
+
+            :};
+
+
+
+
+/* Actual parameters ------------------------------------------------------------------------------------------------------------------------ */
+ActualPars ::= ActualParamList | /* epsilon */;
+ActualParamList ::= ActualParamList COMMA Expr:e    {: addActualParam(e); :}
+                  | Expr:e                          {: addActualParam(e); :}
+                  | error {: printError(Messages.SyntaxErrors.actualParsErr); :} 
+                  ;
+
+
+/* Function call ---------------------------------------------------------------------------------------------------------------------------- */
+FuncCall ::= Designator:func
+{:
+            if (inMain) parser.fcallInMainCount++;
+
+            if (func != null)
+            {
+                
+                if ( Obj.Meth == func.getKind() ) // function and method
+                {
+                        if ( currClass == null && isFunctionCall == true) // not in class and its not IDENT.IDENT
+                            parser.report_info( Messages.SemanticMessages.functionCalled(func, funcleft), null );
+                        else 
+                        {
+                            parser.report_info( Messages.SemanticMessages.methodCalled(func, funcleft), null );
+                        } 
+                          
+                }   
+                else printError( Messages.SemanticErrors.notFunction(func.getName(), funcleft) );
+                        
+
+                RESULT = func;
+            }
+:};
+
+
+
+/* Conditions ---------------------------------------------------------------------------------------------------------------------------- */
+Cond ::= LPAREN 
+        {: 
+            // Condition start
+            falseAddressFixStack.push( new ArrayList<Integer>() );
+            orConditionAddressFixList = new ArrayList<Integer>();
+        :} 
+        Condition RPAREN
+        {:
+
+            // jump here if one or part is true
+            for (Integer i: orConditionAddressFixList)
+                Code.fixup(i);
+
+        :}
+
+       | LPAREN error RPAREN {: printError(Messages.SyntaxErrors.condErr); :} 
+       ;
+
+/* OR */
+Condition ::= 
+                Condition 
+                {:
+                    // left part of OR
+                    // if cond true, skip rest
+                    Code.putJump(0);
+                    orConditionAddressFixList.add(Code.pc-2);
+
+                    // redirect false jump to right part
+                    ArrayList<Integer> al = falseAddressFixStack.pop();
+                    for (Integer i: al) Code.fixup(i);
+
+                    // repeat
+                    falseAddressFixStack.push( new ArrayList<Integer>() ); 
+
+                :}
+                OR CondTerm 
+                | CondTerm ;
+
+/* AND */
+CondTerm ::= CondTerm AND CondFact | CondFact ;
+
+CondFact ::= 
+            Expr:t 
+            {:
+                // the lonely boolean
+                Struct res = Tab.noType;
+
+                if (t != null)
+                {
+                    if ( !t.getType().equals(parser.boolType) ) printError( Messages.SemanticErrors.onlyBoolean(tleft) );
+                    else res = parser.boolType;
+
+                    // CodeGen bool == 1
+                    Code.loadConst(1);
+
+                    // fix after while or if
+                    Code.putFalseJump(Code.eq, 0); 
+                    falseAddressFixStack.peek().add(Code.pc - 2);
+
+                }
+
+                RESULT = res;
+
+            :}
+
+            | Expr:e1 Relop:op Expr:e2
+            {:
+                
+                if (e1 != null && e2 != null)
+                {
+                    // == and !=
+                    if (op == Code.eq || op == Code.ne)
+                    {
+                        if ( !e1.getType().equals(e2.getType()) ) 
+                            printError( Messages.SemanticErrors.cannotCompare(e1left) );
+                        else
+                        {
+                            // todo for strings
+                            // fix after while or if
+                            Code.putFalseJump(op, 0);
+                            falseAddressFixStack.peek().add(Code.pc - 2);
+                        }
+                    }
+                    else 
+                    {
+                        if ( !e1.getType().equals(e2.getType()) || e1.getType() != Tab.intType ) 
+                            printError( Messages.SemanticErrors.cannotCompare(e1left) );
+                        else
+                        {
+                            // fix after while or if
+                            Code.putFalseJump(op, 0);
+                            falseAddressFixStack.peek().add(Code.pc - 2);
+                        }
+                    }
+
+                    RESULT = parser.boolType;
+
+                }
+
+            :}
+            ; 
+ 
+
+/* Expresions ---------------------------------------------------------------------------------------------------------------------------- */
+Expr ::= Expr:e Addop:op Term:t
+        {:
+
+            if (e != null && t != null)
+            {
+                    // integer - all operations
+                    if (t.getType().equals( e.getType() ) && (t.getType() == Tab.intType))
+                    {
+                            // e and t on stack
+                            Code.put(op);
+
+                            RESULT = e;  
+                    } 
+                    // string - plus only                 
+                    else if (t.getType().equals( e.getType() ) && t.getType().equals(parser.stringType) && (op == Code.add))
+                    {
+
+                            Code.put(Code.call);
+                            Code.put2(addStringAdr - Code.pc + 1);
+                            RESULT = e;
+                    }
+                            
+                    else 
+                    {
+                            printError( Messages.SemanticErrors.wrongType(currTypeName, tleft) );
+                            RESULT = null;
+                    }
+            }
+            
+        :}
+
+        | Term:t        
+        {: 
+            RESULT = t;
+        :}
+        
+        | MINUS Term:t  
+        {: 
+            
+            if (t != null)
+            {
+                if ( t.getType() != Tab.intType ) 
+                    printError( Messages.SemanticErrors.onlyInteger(tleft) );
+
+                Code.put(Code.neg); // -t on stack
+            }
+
+            RESULT = t; 
+        :}
+        ;
+
+
+/* Term ---------------------------------------------------------------------------------------------------------------------------- */	
+Term ::= Term:t Mulop:op Factor:f
+        {:
+            // only int types
+            if(t != null && f != null)
+            {
+                if (t.getType().equals( f.getType() ) && (t.getType() == Tab.intType))
+                {
+                        // t and f on stack
+                        Code.put(op);           
+                        RESULT = t;
+                }
+                else 
+                {
+                        printError( Messages.SemanticErrors.wrongType(currTypeName, tleft) );
+                        RESULT = null;
+                } 
+            }
+
+        :}
+
+        | Factor:f 
+        {:           
+            RESULT = f;
+        :} 
+        ;
+
+
+/* Factor ---------------------------------------------------------------------------------------------------------------------------- */
+Factor ::= 
+        NUMBER:i         
+        {: 
+                Obj con = new Obj(Obj.Con, "", Tab.intType);
+               
+                con.setAdr(i.intValue());
+                Code.load(con); // put on expresion stack
+                
+                RESULT = con;
+        :}
+
+        | CHARCONST:i      
+        {: 
+                Obj con = new Obj(Obj.Con, "", Tab.charType);
+               
+                con.setAdr(i.charValue());
+                Code.load(con); // put on expresion stack
+
+                RESULT = con; 
+
+        :}
+        
+        | BOOLCONST:i      
+        {: 
+                Obj con = Tab.insert(Obj.Con, "", parser.boolType);
+
+                if (i.equals("true")) con.setAdr(1);
+                else con.setAdr(0);
+
+                Code.load(con); 
+
+                RESULT = con; 
+                
+        :}
+        
+        | STRCONST:i        
+        {: 
+ 
+                Obj con = new Obj(Obj.Con, "", parser.stringType);
+
+                // allocate on heap - len bytes
+                Code.loadConst(i.length());
+                Code.put(Code.newarray);
+                Code.put(0);
+
+                // address on stack
+                for (int index = 0; index < i.length(); index++)
+                {
+                    Code.put(Code.dup); // duplicate, bastore removes address
+                    Code.loadConst(index);
+                    Code.loadConst(i.charAt(index));
+                    Code.put(Code.bastore);
+                }
+
+                RESULT = con; 
+        :}
+
+        | Designator:d  
+        {: 
+                if (d != null)
+                {
+                    Code.load(d);
+                }
+                    
+                RESULT = d;
+
+        :} 
+
+        | LPAREN Expr:e RPAREN 
+        {: 
+                RESULT = e; 
+        :}
+        
+        | NEW Type:t                          
+        {: 
+                if (t != null)
+                {
+                    if (t.getType().getKind() != Struct.Class)
+                        printError( Messages.SemanticErrors.wrongType(t.getName(), tleft) );
+                    else
+                    { 
+                        Code.put(Code.new_);
+                        Code.put2(t.getType().getNumberOfFields() * 4);
+
+                        parser.newObjectCount++;
+
+                        // set VT address
+                        Code.put(Code.dup);
+                        Code.loadConst(t.getAdr());
+                        Code.put(Code.putfield);
+                        Code.put2(0);
+                    }
+                }
+
+                // ret obj
+                RESULT = t; 
+
+        :}
+
+        | NEW Type:t LBRACKET Expr:e RBRACKET   
+        {: 
+                if (t != null && e != null)
+                {
+                    if (e.getType() != Tab.intType)
+                        printError( Messages.SemanticErrors.onlyInteger(eleft) );
+                    else
+                    {     
+                            // number of elements on stack
+                            Obj arr = new Obj(Obj.Elem, t.getName(), new Struct(Struct.Array, t.getType()) );
+
+                            Code.put(Code.newarray);
+                            if ( t.getType() == Tab.charType ) Code.put(0); 
+                            else Code.put(1);
+
+                            // address left on stack
+                            parser.newObjectCount++;
+                            RESULT = arr;
+                    }
+
+                }
+                else RESULT = t;                
+        :}
+        
+        | FuncCall:f LPAREN ActualPars RPAREN             
+        {:
+                // end of function call
+                generateFunctionCall(f, fleft);
+
+                if (f != null)
+                    if (f.getType() == Tab.noType)
+                        printError( Messages.SemanticErrors.voidAssign(fleft) );
+
+                RESULT = f;
+        :}
+        ;
+	
+
+
+/* Designator ---------------------------------------------------------------------------------------------------------------------------- */
+Designator ::= IdentList:des {: RESULT = des; :};
+
+IdentList ::= IdentList:i DOT IDENT:name
+            {:
+                Obj member = null;
+                
+                if (i != null)
+                {
+                    if ( i.getType().getKind() != Struct.Class) // class type?
+                    {
+                        printError( Messages.SemanticErrors.notObject(i.getName(), ileft) );
+                    }
+                    else // find closest member
+                    {
+                        Struct type = i.getType();
+
+                        if (currClass != null) member = Tab.currentScope.getOuter().findSymbol(name);
+
+                        while (type != null && member == null)
+                        {
+                            for ( Obj f : type.getMembers() )
+                                if ( name.equals( f.getName() ) )
+                                {
+                                    member = f;
+                                    break;
+                                }
+
+                            type = type.getElemType(); // move to parent
+
+                        }
+   
+                        if ( member == null ) printError( Messages.SemanticErrors.memberNotFound(name, ileft) );
+                        else 
+                        {  
+                            if (member.getKind() == Obj.Meth)
+                            {
+                                callingObjAddressStack.push(i);
+                                isFunctionCall = false;
+                            }
+
+                            // address on stack
+                            if (i.getKind() != Obj.Type)
+                                Code.load(i);
+                            else
+                            {
+                                // this.member
+                                if (member.getKind() == Obj.Fld || member.getKind() == Obj.Meth) 
+                                    Code.put(Code.load_n + 0);
+                            }
+                        }          
+                    }        
+                }
+
+                RESULT = member;
+            :}
+            
+            // designator [expr]
+            | IdentList:d LBRACKET
+                    {:
+                        // add array address to stack before index
+                        if (d != null)
+                        {
+                                if (d.getType().getKind() != Struct.Array)
+                                    printError( Messages.SemanticErrors.wrongType(d.getName(), dleft) );
+                                else  Code.load(d);
+
+                                RESULT = new Obj( Obj.Elem , d.getName() , d.getType().getElemType() );
+                        }
+
+                    :}
+
+                    Expr:e RBRACKET 
+                    {: 
+                        if (e != null)
+                            if (e.getType() != Tab.intType)
+                                    printError( Messages.SemanticErrors.onlyInteger(eleft) );
+
+                    :}
+
+            | IdentList LBRACKET error RBRACKET 
+            {: 
+                printError(Messages.SyntaxErrors.arrayIndexErr); 
+            :}
+
+            | IDENT:name
+            {:
+                // find symbol in table
+                Obj obj = null;
+
+                // local
+                obj = Tab.currentScope.findSymbol(name);
+
+                
+                // find in class
+                if (obj == null && currClass != null)
+                {
+
+                        Struct type = currClass.getType();
+
+                        obj = Tab.currentScope.getOuter().findSymbol(name);
+
+                        while (type != null && obj == null)
+                        {
+                                for ( Obj field : type.getMembers() )
+                                    if ( name.equals( field.getName() ) )
+                                    {
+                                        obj = field;
+                                        break;
+                                    }
+
+                                type = type.getElemType();
+                        }
+
+                        if (name.equals("this")) obj = currClass;
+                }
+
+                // global
+                if (obj == null) obj = Tab.find(name);
+
+                // symbol not found
+                if ( obj == Tab.noObj || obj == null)
+                {
+                    obj = null;
+                    printError( Messages.SemanticErrors.nameNotDeclaredErr(name, nameleft) );
+                }
+                else if (obj.getKind() != Obj.Meth) parser.report_info(Messages.SemanticMessages.symbolFound(obj, nameleft), null);
+
+                // load this
+                if (obj != null && currClass != null)
+                {
+                    if (obj.getKind() == Obj.Fld) 
+                        Code.put(Code.load_n + 0);
+                    else if (obj.getKind() == Obj.Meth)
+                    {
+                        Code.put(Code.load_n + 0); 
+
+                        callingObjAddressStack.push(currClass);
+
+                        isFunctionCall = true;
+                    }
+                }
+
+                RESULT = obj;
+            
+            :}
+            ;
+
+
+
+/* Operators ---------------------------------------------------------------------------------------------------------------------------- */
+Relop ::= GREATER       {: RESULT = Code.gt; :}
+        | GREATEREQUAL  {: RESULT = Code.ge; :}
+        | LESSEQUAL     {: RESULT = Code.le; :}
+        | LESS          {: RESULT = Code.lt; :}
+        | NOTEQUAL      {: RESULT = Code.ne; :}
+        | EQUAL         {: RESULT = Code.eq; :} 
+        ;
+
+Addop ::= PLUS  {: RESULT = Code.add; :}
+        | MINUS {: RESULT = Code.sub; :}
+        ;
+
+Mulop ::= MUL {: RESULT = Code.mul; :}
+        | DIV {: RESULT = Code.div; :}
+        | MOD {: RESULT = Code.rem; :}
+        ;

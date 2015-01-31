@@ -1,0 +1,82 @@
+program Program
+
+	int gl;
+	class A
+	{
+		int a, b, c;
+		{
+			void f(){ print('A'); }
+		}
+	}
+	
+	int l;
+	
+	class B extends A
+	{
+		int x, y;
+		{
+			void g() 
+			{ 
+				print('y'); 
+				print(y); 
+				a = 5;
+				this.a = 5;
+			}
+			
+			void f()
+			{ 
+				print('x');
+				print(x); 
+				this.g();
+			}
+		}
+	}
+	
+	int l2;
+	
+	class C extends A
+	{
+		int x, y;
+	}
+	
+	int gl2;
+	
+	class D extends B
+	{{
+		void f(){ print(a); }
+		void w(int a) { print(a); } 
+	}}
+
+	A a;
+	B b;
+	C c;
+	D d;
+	B b2;
+
+{
+
+	void poly() int la, lb;
+	{
+		a = new B;
+		a.f();
+		b = new B;
+		b.a = 7;
+		b.x = 3;
+		b.y = b.x * 2;
+		b.f();
+		c = new C;
+		c.f();
+		d = new D;
+		d.f();
+		d.w(2);
+		
+		b2 = new B;
+		print(b2.a);	
+	}
+	
+	void main() int la;
+	{
+		poly();
+	}
+
+}

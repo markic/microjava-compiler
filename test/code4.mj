@@ -1,0 +1,53 @@
+// class advanced
+program Program
+	
+class A
+{
+	int x;
+	int b;
+	int a;
+	{
+		void f() { a = 15; print("f in A\n"); }
+	}
+
+}
+
+class B extends A
+{
+	int y;
+	int z;
+	{ void f() { print ("f in B\n"); } }
+}
+
+class C extends B
+{ 
+	int i;
+	int b;
+	int c;
+	int d;
+	
+	{ void f() { print ("f in C\n"); } }
+	
+}
+	
+	A a;
+	C c;
+{
+	
+	void main()
+	{
+		a = new A;
+		c = new C;
+		
+		c.a = 10;
+		
+		c.f();
+		print(c.a);
+		
+		a.a = 10;
+		
+		a.f();
+		print(a.a);
+		
+	}
+}

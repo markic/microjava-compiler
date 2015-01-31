@@ -1,0 +1,21 @@
+program LieutenantCommander
+
+	int c3;
+	int c2;
+	const string useAdr = "btw1234";
+	const string s3 = "commander";
+	const int var = 15;
+
+{
+	
+	void main()string s2;
+	{
+		s2 = "call me\n";
+		print(s2);
+		
+		print("lieutenant ");
+		
+		print(s3);
+	}
+
+}
