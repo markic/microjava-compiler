@@ -9,8 +9,6 @@ School of Electrical Engineering, University of Belgrade, Serbia.
 
 
 Developed by Marin Markić. No licence. October - December 2013.
-- marinmarkic@mail.com
-
 
 ### Micro Java language
 Language and this compiler supports following: constants, primitive types, strings, static variables, local variables, arrays, functions, classes with fields and methods, objects, class inheritance and polymorphism, dynamic binding, operators and special keywords such as len, print, read etc. Full language specification can be found in docs folder. Program source file extension is mj. Open test folder for micro java program examples.
